@@ -1,9 +1,11 @@
 import argparse
 import concurrent.futures
+from concurrent.futures import process
 import itertools
 from multiprocessing import cpu_count
 import os
 import subprocess
+from tabnanny import check
 
 import data_deploy.shared.copy
 import data_deploy.shared.link
@@ -47,9 +49,21 @@ def _ensure_attr(connection):
     '''Installs the 'attr' package, if not available.'''
     _, _, exitcode = remoto.process.check(connection, 'which setfattr', shell=True)
     if exitcode != 0:
-        out, err, exitcode = remoto.process.check(connection, 'sudo apt install attr -y', shell=True)
+        out, err, exitcode = remoto.process.check(connection, 'sudo apt update && sudo apt install attr -y', shell=True)
         if exitcode != 0:
             printe('Could not install "attr" package (needed for "setfattr" command). Exitcode={}.\nOut={}\nErr={}'.format(exitcode, out, err))
+            return False
+    with open ('/home/yzhao/aws_credential.txt') as f:
+        credential = f.readline()
+    access_key_id = credential.split(',')[0]
+    secret_access_key = credential.split(',')[1]
+    region = credential.split(',')[2]
+    _, _, exitcode = remoto.process.check(connection, 'which awscli', shell=True)
+    if exitcode != 0:
+        out, err, exitcode = remoto.process.check(connection, 'sudo apt install awscli -y && aws configure set aws_access_key_id {} && \
+        aws configure set aws_secret_access_key {} && aws configure set default.region {}'.format(access_key_id, secret_access_key, region), shell=True)
+        if exitcode != 0:
+            printe('Could not install "awscli" package. Exitcode={}.\nOut={}\nErr={}'.format(exitcode, out, err))
             return False
     return True
 
@@ -136,16 +150,17 @@ def _execute_internal(connectionwrapper, reservation, paths, dest, silent, copy_
                             printe('File {} is too large ({} bytes, max allowed is {} bytes)'.format(x, os.path.getsize(x), max_filesize))
                         return False
                     files_to_deploy += [(x, fs.join(dest, x[path_len+1:])) for x in files]
+
+        if not silent:
+            print('Transferring data...')
+
         futures_pre_deploy = [executor.submit(_pre_deploy_remote_file, connectionwrapper.connection, stripe, copies_to_add, links_to_add, source_file, dest_file) for (source_file, dest_file) in files_to_deploy]
         if not all(x.result() for x in futures_pre_deploy):
             printe('Pre-data deployment error occured.')
             return False
-
-        if not silent:
-            print('Transferring data...')
-        fun = lambda path: subprocess.call('rsync -e "ssh -F {}" -q -aHAXL --inplace {} {}:{}'.format(connectionwrapper.ssh_config.name, path, admin_node.ip_public, fs.join(dest, fs.basename(path))), shell=True) == 0
+                
+        fun = lambda path: subprocess.call('ssh -F {} ubuntu@{} "cd {} && aws s3 sync s3://ceph-dataset/tpcds-1t-split/ ./"'.format(connectionwrapper.ssh_config.name, admin_node.ip_public, fs.join(dest, fs.basename(path))), shell=True) == 0
         futures_rsync = {path: executor.submit(fun, path) for path in paths}
-
         state_ok = True
         for path,future in futures_rsync.items():
             if not silent:
@@ -156,8 +171,22 @@ def _execute_internal(connectionwrapper, reservation, paths, dest, silent, copy_
         if not state_ok:
             return False
 
+        # futures_pre_deploy = [executor.submit(_pre_deploy_remote_file, connectionwrapper.connection, stripe, copies_to_add, links_to_add, source_file, dest_file) for (source_file, dest_file) in files_to_deploy]
+        # if not all(x.result() for x in futures_pre_deploy):
+        #     printe('Pre-data deployment error occured.')
+        #     return False
+
+        # Method 1:
+        # _, _, exitcode = remoto.process.check(connectionwrapper.connection, 'UNIX Command', shell=True)
+        # if exitcode != 0:
+        #     return False
+        # Method 2:
+        # if subprocess.call('ssh -F {} ubuntu@{} "UNIX Command"'.format(connectionwrapper.ssh_config.name, admin_node.ip_public), shell=True) != 0:
+        #     return False
+
+
         futures_post_deploy = [executor.submit(_post_deploy_remote_file, connectionwrapper.connection, stripe, copies_to_add, links_to_add, source_file, dest_file) for (source_file, dest_file) in files_to_deploy]
-        if all(x.result() for x in futures_pre_deploy):
+        if all(x.result() for x in futures_post_deploy):
             prints('Data deployment success')
             return True
         else:

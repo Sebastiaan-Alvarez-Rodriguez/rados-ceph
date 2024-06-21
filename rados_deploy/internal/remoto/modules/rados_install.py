@@ -127,7 +127,7 @@ def install_ceph(hosts_designations_mapping, silent=False):
         if not any(designations): # If no designation given for node X, we skip installation of Ceph for X.
             continue
         designation_out = '--'+' --'.join([x.lower() for x in set(designations)])
-        executors.append(Executor('{} --overwrite-conf install --release octopus {} {}'.format(ceph_deploypath, designation_out, hostname), shell=True))
+        executors.append(Executor('{} --overwrite-conf install --release octopus {} {}'.format(ceph_deploypath, designation_out, hostname), shell=True))           
     Executor.run_all(executors)
     return Executor.wait_all(executors, print_on_error=True)
 
@@ -159,7 +159,9 @@ def install_rados(location, hosts_designations_mapping, arrow_url, force_reinsta
             return False
         if not silent:
             print('Installing required libraries for RADOS-Ceph.\nPatience...')
-        cmd = 'sudo apt install libradospp-dev rados-objclass-dev openjdk-8-jdk-headless openjdk-11-jdk-headless libboost-all-dev automake bison flex g++ libevent-dev libssl-dev libtool make pkg-config maven cmake thrift-compiler -y'
+        # cmd = 'sudo apt install libradospp-dev rados-objclass-dev openjdk-8-jdk openjdk-11-jdk default-jdk libboost-all-dev automake bison flex g++ libevent-dev libssl-dev \
+        #     libtool make pkg-config maven cmake thrift-compiler llvm -y'
+        cmd = 'sudo apt install -y python3 python3-pip python3-venv python3-numpy cmake libradospp-dev rados-objclass-dev llvm default-jdk maven'
         if subprocess.call(cmd, shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL) != 0:
             printe('Failed to install all required libraries. Command used: {}'.format(cmd))
             return False
@@ -167,10 +169,18 @@ def install_rados(location, hosts_designations_mapping, arrow_url, force_reinsta
             prints('Installed required libraries.')
         if (not isdir(location)) and not _get_rados_dev(location, arrow_url, silent=silent, retries=5):
             return False
-        cmake_cmd = 'cmake . -DARROW_PARQUET=ON -DARROW_DATASET=ON -DARROW_JNI=ON -DARROW_ORC=ON -DARROW_CSV=ON -DARROW_CLS=ON'
+        
+        cmake_cmd = 'cmake -DARROW_SKYHOOK=ON -DARROW_PARQUET=ON -DARROW_WITH_SNAPPY=ON -DARROW_WITH_ZLIB=ON -DARROW_BUILD_EXAMPLES=ON -DPARQUET_BUILD_EXAMPLES=ON \
+            -DARROW_PYTHON=ON -DARROW_ORC=ON -DARROW_JAVA=ON -DARROW_JNI=ON -DARROW_DATASET=ON -DARROW_CSV=ON -DARROW_WITH_LZ4=ON -DARROW_WITH_ZSTD=ON'
         if debug:
             cmake_cmd += ' -DCMAKE_BUILD_TYPE=Debug'
-        if subprocess.call(cmake_cmd+' 1>&2', cwd='{}/cpp'.format(location), **kwargs) != 0:
+        print ("!!!! " + cmake_cmd + " !!!!!") 
+        
+        my_env = os.environ.copy()
+        my_env["JAVA_HOME"] = "/usr/lib/jvm/java-8-openjdk-amd64"
+        print(my_env)
+        subprocess.call(cmake_cmd+' 1>&2', cwd='{}/cpp'.format(location), env=my_env, **kwargs)
+        if subprocess.call(cmake_cmd+' 1>&2', cwd='{}/cpp'.format(location), env=my_env, **kwargs) != 0:
             return False
         if subprocess.call('sudo make install -j{} 1>&2'.format(cores), cwd='{}/cpp'.format(location), **kwargs) != 0:
             return False
@@ -193,6 +203,7 @@ def install_rados(location, hosts_designations_mapping, arrow_url, force_reinsta
     executors = [Executor('ssh {} "sudo cp ~/.arrow-libs/libcls* /usr/lib/rados-classes/"'.format(x), **kwargs) for x in hosts]
     executors += [Executor('ssh {} "sudo cp ~/.arrow-libs/libarrow* /usr/lib/"'.format(x), **kwargs) for x in hosts]
     executors += [Executor('ssh {} "sudo cp ~/.arrow-libs/libparquet* /usr/lib/"'.format(x), **kwargs) for x in hosts]
+    executors += [Executor('ssh {} "sudo systemctl restart ceph-osd.target"'.format(x), **kwargs) for x in hosts]
     
     Executor.run_all(executors)
     if not Executor.wait_all(executors, print_on_error=True):
